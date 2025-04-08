@@ -1,93 +1,177 @@
-import aiohttp
-import asyncio
 from pyrogram import Client, filters
-from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-import subprocess
-import threading
-import pymongo
+from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pymongo import MongoClient
+from apscheduler.schedulers.background import BackgroundScheduler
 import feedparser
-from config import API_ID, API_HASH, BOT_TOKEN, URL_A, START_PIC, MONGO_URI
+import config
+import re
+import time
 
-from webhook import start_webhook
+app = Client("CanderellaNews", api_id=config.API_ID, api_hash=config.API_HASH, bot_token=config.BOT_TOKEN)
 
-from modules.rss.rss import news_feed_loop
+mongo = MongoClient(config.MONGO_URI)
+db = mongo['CanderellaNews']
+admins_col = db['admins']
+rss_col = db['rss']
+channels_col = db['channels']
+posted_col = db['posted']
 
+scheduler = BackgroundScheduler()
+scheduler.start()
 
-mongo_client = pymongo.MongoClient(MONGO_URI)
-db = mongo_client["AnimeNewsBot"]
-user_settings_collection = db["user_settings"]
-global_settings_collection = db["global_settings"]
+def clean_md(text):
+    escape_chars = r"\_*[]()~`>#+-=|{}.!<>"
+    return re.sub(f"([{re.escape(escape_chars)}])", r'\\\1', text)
 
-
-app = Client("AnimeNewsBot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-
-webhook_thread = threading.Thread(target=start_webhook, daemon=True)
-webhook_thread.start()
-
-
-async def escape_markdown_v2(text: str) -> str:
-    return text
-
-async def send_message_to_user(chat_id: int, message: str, image_url: str = None):
-    try:
-        if image_url:
-            await app.send_photo(
-                chat_id, 
-                image_url,
-                caption=message,
-            )
-        else:
-            await app.send_message(chat_id, message)
-    except Exception as e:
-        print(f"Error sending message: {e}")
+def is_admin(user_id: int) -> bool:
+    return user_id == config.OWNER_ID or admins_col.find_one({"user_id": user_id})
 
 @app.on_message(filters.command("start"))
-async def start(client, message):
-    chat_id = message.chat.id
-    buttons = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("ᴍᴀɪɴ ʜᴜʙ", url="https://t.me/Bots_Nation"),
-            InlineKeyboardButton("ꜱᴜᴩᴩᴏʀᴛ ᴄʜᴀɴɴᴇʟ", url="https://t.me/Bots_Nation_Support"),
-        ],
-        [
-            InlineKeyboardButton("ᴅᴇᴠᴇʟᴏᴩᴇʀ", url="https://t.me/darkxside78"),
-        ],
-    ])
-
-    photo_url = START_PIC
-
-    await app.send_photo(
-        chat_id, 
-        photo_url,
-        caption=(
-            f"**ʙᴀᴋᴋᴀᴀᴀ {message.from_user.username}!!!**\n"
-            f"**ɪ ᴀᴍ ᴀɴ ᴀɴɪᴍᴇ ɴᴇᴡs ʙᴏᴛ.**\n"
-            f"**ɪ ᴛᴀᴋᴇ ᴀɴɪᴍᴇ ɴᴇᴡs ᴄᴏᴍɪɴɢ ғʀᴏᴍ ʀss ꜰᴇᴇᴅs ᴀɴᴅ ᴀᴜᴛᴏᴍᴀᴛɪᴄᴀʟʟʏ ᴜᴘʟᴏᴀᴅ ɪᴛ ᴛᴏ ᴍʏ ᴍᴀsᴛᴇʀ's ᴀɴɪᴍᴇ ɴᴇᴡs ᴄʜᴀɴɴᴇʟ.**"
-        ),
-        reply_markup=buttons
+async def start(client, message: Message):
+    await message.reply_photo(
+        photo=config.START_PIC,
+        caption="**› Welcome to Canderella News Bot!**\n\nUse /help to explore all available commands.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Add to Group", url=f"https://t.me/{app.me.username}?startgroup=true")],
+            [InlineKeyboardButton("Channel", url="https://t.me/Anime_World_Editz")]
+        ])
     )
 
+@app.on_message(filters.command("help"))
+async def help_cmd(client, message: Message):
+    await message.reply_photo(
+        photo=config.START_PIC,
+        caption="**› Help Menu**\n\n"
+                "`/addadmin <user_id>` – Add a new admin\n"
+                "`/removeadmin <user_id>` – Remove an admin\n"
+                "`/adminslist` – List all admins\n\n"
+                "`/addrss <url>` – Add RSS feed\n"
+                "`/removerss <url>` – Remove RSS feed\n"
+                "`/listrss` – List RSS feeds\n\n"
+                "`/news` – Fetch and post latest news\n",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("Developer", url="https://t.me/RexySama")]
+        ])
+    )
+
+@app.on_message(filters.command("addadmin") & filters.private)
+async def addadmin(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.reply("You are not authorized.")
+    if len(message.command) < 2:
+        return await message.reply("Usage: /addadmin <user_id>")
+    try:
+        uid = int(message.command[1])
+        if admins_col.find_one({"user_id": uid}):
+            return await message.reply("Already an admin.")
+        admins_col.insert_one({"user_id": uid})
+        await message.reply(f"`{uid}` added as admin.", parse_mode="markdown")
+    except:
+        await message.reply("Invalid ID.")
+
+@app.on_message(filters.command("removeadmin") & filters.private)
+async def removeadmin(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.reply("You are not authorized.")
+    if len(message.command) < 2:
+        return await message.reply("Usage: /removeadmin <user_id>")
+    try:
+        uid = int(message.command[1])
+        res = admins_col.delete_one({"user_id": uid})
+        if res.deleted_count == 0:
+            return await message.reply("User not found.")
+        await message.reply(f"`{uid}` removed from admin list.", parse_mode="markdown")
+    except:
+        await message.reply("Invalid ID.")
+
+@app.on_message(filters.command("adminslist"))
+async def adminslist(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.reply("You are not authorized.")
+    admins = admins_col.find()
+    text = "**› Admins List:**\n\n"
+    for a in admins:
+        text += f"- `{a['user_id']}`\n"
+    await message.reply(text, parse_mode="markdown")
+
+@app.on_message(filters.command("addrss"))
+async def addrss(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.reply("You are not authorized.")
+    if len(message.command) < 2:
+        return await message.reply("Usage: /addrss <rss_url>")
+    url = message.command[1]
+    if rss_col.find_one({"url": url}):
+        return await message.reply("RSS already exists.")
+    rss_col.insert_one({"url": url})
+    await message.reply(f"Added RSS:\n`{url}`", parse_mode="markdown")
+
+@app.on_message(filters.command("removerss"))
+async def removerss(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.reply("You are not authorized.")
+    if len(message.command) < 2:
+        return await message.reply("Usage: /removerss <rss_url>")
+    url = message.command[1]
+    res = rss_col.delete_one({"url": url})
+    if res.deleted_count == 0:
+        return await message.reply("RSS not found.")
+    await message.reply(f"Removed RSS:\n`{url}`", parse_mode="markdown")
+
+@app.on_message(filters.command("listrss"))
+async def listrss(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.reply("You are not authorized.")
+    feeds = rss_col.find()
+    text = "**› RSS Feeds:**\n\n"
+    for feed in feeds:
+        text += f"- `{feed['url']}`\n"
+    await message.reply(text, parse_mode="markdown")
 
 @app.on_message(filters.command("news"))
-async def connect_news(client, message):
-    chat_id = message.chat.id
-    if len(message.text.split()) == 1:
-        await app.send_message(chat_id, "<blockquote>Please provide a channel id or username (without @).</blockquote>")
-        return
+async def post_news_command(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.reply("You are not authorized.")
+    await fetch_and_post_news()
 
-    channel = " ".join(message.text.split()[1:]).strip()
-    global_settings_collection.update_one({"_id": "config"}, {"$set": {"news_channel": channel}}, upsert=True)
-    await app.send_message(chat_id, f"News channel set to: @{channel}")
+async def fetch_and_post_news():
+    feeds = rss_col.find()
+    for feed in feeds:
+        url = feed['url']
+        parsed = feedparser.parse(url)
+        if not parsed.entries:
+            continue
+        entry = parsed.entries[0]
+        link = entry.link
+        if posted_col.find_one({"link": link}):
+            continue
+        title = clean_md(entry.title)
+        summary = clean_md(entry.get("summary", ""))
+        img_url = ""
+        if 'media_content' in entry:
+            img_url = entry.media_content[0]['url']
+        elif 'links' in entry:
+            for link_obj in entry.links:
+                if link_obj.type.startswith("image"):
+                    img_url = link_obj.href
+                    break
+        text = f"**› {title}**\n\n> {summary[:500]}...\n\n[Read More]({entry.link})"
+        for channel in channels_col.find():
+            try:
+                await app.send_photo(
+                    chat_id=channel['chat_id'],
+                    photo=img_url or config.START_PIC,
+                    caption=text,
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("Read Full Article", url=entry.link)]
+                    ]),
+                    parse_mode="markdown"
+                )
+            except Exception as e:
+                print(f"Failed to post to {channel['chat_id']}: {e}")
+        posted_col.insert_one({"link": link, "time": time.time()})
 
-sent_news_entries = set()
+# Auto post news every 10 minutes
+scheduler.add_job(fetch_and_post_news, "interval", minutes=10)
 
-async def main():
-    await app.start()
-    print("Bot is running...")
-    asyncio.create_task(news_feed_loop(app, db, global_settings_collection, [URL_A]))
-    await asyncio.Event().wait()
-
-if __name__ == '__main__':
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
+app.run()
