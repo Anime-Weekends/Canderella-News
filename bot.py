@@ -72,12 +72,8 @@ async def start(client, message):
 @app.on_message(filters.command("news"))
 async def connect_news(client, message):
     chat_id = message.chat.id
-    
-    if message.from_user.id not in ADMINS:
-        await app.send_message(chat_id, "You do not have permission to use this command.")
-        return
     if len(message.text.split()) == 1:
-        await app.send_message(chat_id, "Please provide a channel id or username (without @).")
+        await app.send_message(chat_id, "<blockquote>Please provide a channel id or username (without @).</blockquote>")
         return
 
     channel = " ".join(message.text.split()[1:]).strip()
