@@ -1,0 +1,7 @@
+aiohttp
+pyrofork
+pymongo
+python-dotenv
+flask
+tgcrypto
+feedparser
